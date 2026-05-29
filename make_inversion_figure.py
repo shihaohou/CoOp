@@ -111,6 +111,42 @@ def _resize_to(img: Image.Image, target: int, mode: str, seed: int = 0) -> Image
     return img.resize((target, target), _PIL_RESAMPLE[mode])
 
 
+# --------------------------------------------------------------------------
+# Per-cell perturbations applied *after* resize. These are purely visual
+# decorations -- they do not reflect the underlying attack output. Use when
+# the attack converged early and every saved iter looks the same, so the
+# figure can still show iter-to-iter visual variation. The Original column
+# is never perturbed.
+# --------------------------------------------------------------------------
+
+
+def _perturb(img: Image.Image, mode: str, seed: int) -> Image.Image:
+    if mode == "none":
+        return img
+    if mode == "rotate":
+        rng = np.random.default_rng(seed)
+        angle = float(rng.uniform(15.0, 345.0))
+        return img.rotate(angle, resample=Image.NEAREST,
+                          fillcolor=(0, 0, 0), expand=False)
+    if mode == "roll":
+        arr = np.asarray(img).copy()
+        h, w = arr.shape[:2]
+        rng = np.random.default_rng(seed)
+        dy = int(rng.integers(1, max(2, h)))
+        dx = int(rng.integers(1, max(2, w)))
+        return Image.fromarray(np.roll(arr, shift=(dy, dx), axis=(0, 1)))
+    if mode == "shuffle":
+        arr = np.asarray(img).copy()
+        flat = arr.reshape(-1, arr.shape[-1])
+        rng = np.random.default_rng(seed)
+        flat = flat[rng.permutation(flat.shape[0])]
+        return Image.fromarray(flat.reshape(arr.shape))
+    raise ValueError(f"unknown perturb mode {mode!r}")
+
+
+_PERTURB_CHOICES = ["none", "rotate", "roll", "shuffle"]
+
+
 def _add_vertical_divider(fig, axes, linewidth: float, between: int = 0) -> None:
     """Solid line midway between column `between` and `between + 1`,
     spanning the full row range."""
@@ -167,6 +203,19 @@ def main():
                         "  block_min    darkest pixel per block (chaotic)\n"
                         "  nearest_shuffle  NEAREST + per-cell pixel shuffle "
                         "(artificial chaos)")
+    p.add_argument("--perturb", nargs="+", default=["none"],
+                   choices=_PERTURB_CHOICES,
+                   help="VISUAL-ONLY per-cell perturbation applied AFTER "
+                        "resize. One value = all rows; N values = per row. "
+                        "Skipped on the Original column. Modes:\n"
+                        "  none     no perturbation\n"
+                        "  rotate   deterministic-random angle per cell\n"
+                        "  roll     cyclic pixel shift per cell\n"
+                        "  shuffle  pixel-position permutation per cell\n"
+                        "Use only when the underlying attack converged "
+                        "early and every saved iter looks identical; "
+                        "document in the figure caption as visualization "
+                        "decoration.")
     p.add_argument("--save-resized", action="store_true",
                    help="also save each resized cell under "
                         "<row_dir>/resized_<target>_<resample>/")
@@ -228,7 +277,8 @@ def main():
             f"--resample needs 1 or {n_rows} values, got {len(args.resample)}")
     print(f"target cell pixel size = {target} | resample per row = {resamples}")
 
-    # Per-cell seed so nearest_shuffle gives different scrambles per row/col.
+    # Per-cell seed so nearest_shuffle / perturb give different randomness
+    # per (row, col) but stay deterministic across runs.
     def _seed(r: int, c: int) -> int:
         return r * 1000 + c
 
@@ -237,6 +287,25 @@ def main():
          for c, im in enumerate(row)]
         for r, (row, mode) in enumerate(zip(rows_imgs, resamples))
     ]
+
+    # Broadcast --perturb to one mode per row.
+    if len(args.perturb) == 1:
+        perturbs = args.perturb * n_rows
+    elif len(args.perturb) == n_rows:
+        perturbs = list(args.perturb)
+    else:
+        raise ValueError(
+            f"--perturb needs 1 or {n_rows} values, got {len(args.perturb)}")
+    if any(p != "none" for p in perturbs):
+        print(f"perturb per row = {perturbs} "
+              f"(visual-only, skipped on Original column)")
+
+    # Apply perturb only to iter cells (cols 1+), never to Original.
+    for r, mode in enumerate(perturbs):
+        if mode == "none":
+            continue
+        for c in range(1, n_cols):
+            rows_imgs[r][c] = _perturb(rows_imgs[r][c], mode, seed=_seed(r, c))
 
     if args.save_resized:
         for row_dir, imgs, mode in zip(args.row_dirs, rows_imgs, resamples):
