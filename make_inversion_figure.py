@@ -41,10 +41,26 @@ def _row_images(row_dir: str, iters: List[int]) -> List[Image.Image]:
     return images
 
 
-def _resize_to(img: Image.Image, target: int) -> Image.Image:
+_RESAMPLE_MAP = {
+    "nearest": Image.NEAREST,
+    "bilinear": Image.BILINEAR,
+    "bicubic": Image.BICUBIC,
+    "lanczos": Image.LANCZOS,
+}
+
+
+def _resize_to(img: Image.Image, target: int, mode: str = "auto") -> Image.Image:
+    """Resize to (target, target). 'auto' picks NEAREST when upscaling
+    (preserves pixel-art texture) and LANCZOS when downscaling (avoids
+    aliasing on high-frequency content like attack noise)."""
     if img.size == (target, target):
         return img
-    return img.resize((target, target), Image.NEAREST)
+    if mode == "auto":
+        src = max(img.size)
+        method = Image.NEAREST if target >= src else Image.LANCZOS
+    else:
+        method = _RESAMPLE_MAP[mode]
+    return img.resize((target, target), method)
 
 
 def main():
@@ -58,8 +74,12 @@ def main():
                    help="output figure path (PNG or PDF); a sibling .png is "
                         "always saved as well for quick inspection")
     p.add_argument("--target-size", type=int, default=0,
-                   help="resize every cell to this many pixels per side with "
-                        "nearest-neighbor; 0 = use max size across all inputs")
+                   help="resize every cell to this many pixels per side; "
+                        "0 = use max size across all inputs")
+    p.add_argument("--resample", default="auto",
+                   choices=["auto", "nearest", "bilinear", "bicubic", "lanczos"],
+                   help="resampling filter: auto = NEAREST when upscaling, "
+                        "LANCZOS when downscaling")
     p.add_argument("--cell-size", type=float, default=1.6,
                    help="approximate inches per cell")
     p.add_argument("--dpi", type=int, default=300)
@@ -86,7 +106,8 @@ def main():
         target = max(max(im.size) for row in rows_imgs for im in row)
     print(f"target cell pixel size = {target}")
 
-    rows_imgs = [[_resize_to(im, target) for im in row] for row in rows_imgs]
+    rows_imgs = [[_resize_to(im, target, args.resample) for im in row]
+                 for row in rows_imgs]
 
     fig, axes = plt.subplots(
         n_rows, n_cols,
