@@ -107,8 +107,14 @@ def main():
     p.add_argument("--target-size", type=int, default=0,
                    help="resize every cell to this many pixels per side; "
                         "0 = max size across all inputs")
-    p.add_argument("--resample", default="nearest",
-                   choices=["auto", "nearest", "bilinear", "bicubic", "lanczos"])
+    p.add_argument("--resample", nargs="+", default=["auto"],
+                   choices=["auto", "nearest", "bilinear", "bicubic", "lanczos"],
+                   help="resampling filter. Pass 1 value to apply it to all "
+                        "rows, or N values to set one per row. 'auto' picks "
+                        "NEAREST when upscaling (preserves pixel art) and "
+                        "LANCZOS when downscaling (averages over 7x7 blocks "
+                        "so different iters look different instead of "
+                        "becoming the same random subsample).")
     p.add_argument("--save-resized", action="store_true",
                    help="also save each resized cell under "
                         "<row_dir>/resized_<target>_<resample>/")
@@ -159,14 +165,23 @@ def main():
         target = args.target_size
     else:
         target = max(max(im.size) for row in rows_imgs for im in row)
-    print(f"target cell pixel size = {target} | resample = {args.resample}")
 
-    rows_imgs = [[_resize_to(im, target, args.resample) for im in row]
-                 for row in rows_imgs]
+    # Broadcast --resample to one value per row.
+    if len(args.resample) == 1:
+        resamples = args.resample * n_rows
+    elif len(args.resample) == n_rows:
+        resamples = list(args.resample)
+    else:
+        raise ValueError(
+            f"--resample needs 1 or {n_rows} values, got {len(args.resample)}")
+    print(f"target cell pixel size = {target} | resample per row = {resamples}")
+
+    rows_imgs = [[_resize_to(im, target, mode) for im in row]
+                 for row, mode in zip(rows_imgs, resamples)]
 
     if args.save_resized:
-        for row_dir, imgs in zip(args.row_dirs, rows_imgs):
-            out_dir = os.path.join(row_dir, f"resized_{target}_{args.resample}")
+        for row_dir, imgs, mode in zip(args.row_dirs, rows_imgs, resamples):
+            out_dir = os.path.join(row_dir, f"resized_{target}_{mode}")
             os.makedirs(out_dir, exist_ok=True)
             imgs[0].save(os.path.join(out_dir, "original.png"))
             for i, it in enumerate(iters):
