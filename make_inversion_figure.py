@@ -16,10 +16,16 @@ stitched PDF (nearest-neighbor preserves the chunky pixel look of the
 
 import argparse
 import os
-from typing import List, Optional
+from typing import List
 
-import matplotlib.pyplot as plt
-from PIL import Image
+# Force a non-interactive backend so the script works on headless servers
+# regardless of matplotlibrc.
+import matplotlib
+matplotlib.use("Agg")
+
+import matplotlib.pyplot as plt  # noqa: E402
+import numpy as np  # noqa: E402
+from PIL import Image  # noqa: E402
 
 
 def _load_png(path: str) -> Image.Image:
@@ -49,7 +55,8 @@ def main():
                    help="left-side label for each row; must match --row-dirs length")
     p.add_argument("--iters", default="0,20,40,60,80,100")
     p.add_argument("--output", required=True,
-                   help="output figure path (PNG or PDF)")
+                   help="output figure path (PNG or PDF); a sibling .png is "
+                        "always saved as well for quick inspection")
     p.add_argument("--target-size", type=int, default=0,
                    help="resize every cell to this many pixels per side with "
                         "nearest-neighbor; 0 = use max size across all inputs")
@@ -68,7 +75,10 @@ def main():
     # Load everything first, then pick a common pixel size.
     rows_imgs: List[List[Image.Image]] = []
     for row_dir in args.row_dirs:
-        rows_imgs.append(_row_images(row_dir, iters))
+        imgs = _row_images(row_dir, iters)
+        sizes = [im.size for im in imgs]
+        print(f"loaded {row_dir}: {sizes[0]} + {len(iters)} iters at {sizes[1]}")
+        rows_imgs.append(imgs)
 
     if args.target_size > 0:
         target = args.target_size
@@ -80,7 +90,7 @@ def main():
 
     fig, axes = plt.subplots(
         n_rows, n_cols,
-        figsize=(args.cell_size * n_cols, args.cell_size * n_rows),
+        figsize=(args.cell_size * n_cols, args.cell_size * n_rows + 0.4),
         squeeze=False,
     )
 
@@ -89,19 +99,33 @@ def main():
     for r, (imgs, row_label) in enumerate(zip(rows_imgs, args.row_labels)):
         for c in range(n_cols):
             ax = axes[r, c]
-            ax.imshow(imgs[c])
+            # numpy.asarray makes PIL -> matplotlib path explicit, avoids
+            # surprises with some PIL/matplotlib version combos.
+            ax.imshow(np.asarray(imgs[c]))
             ax.set_xticks([])
             ax.set_yticks([])
-            for spine in ax.spines.values():
-                spine.set_visible(False)
             if r == 0:
                 ax.set_title(col_titles[c], fontsize=12)
             if c == 0:
                 ax.set_ylabel(row_label, fontsize=11)
 
-    fig.subplots_adjust(wspace=0.05, hspace=0.05)
-    fig.savefig(args.output, dpi=args.dpi, bbox_inches="tight")
-    print(f"Saved figure to {args.output}")
+    fig.subplots_adjust(
+        left=0.05, right=0.98, top=0.92, bottom=0.05,
+        wspace=0.05, hspace=0.05,
+    )
+
+    fig.savefig(args.output, dpi=args.dpi)
+    out_size = os.path.getsize(args.output)
+    print(f"Saved {args.output} ({out_size:,} bytes)")
+
+    # Also save a PNG sibling so the user can sanity-check without a PDF viewer.
+    base, ext = os.path.splitext(args.output)
+    if ext.lower() != ".png":
+        sibling = base + ".png"
+        fig.savefig(sibling, dpi=args.dpi)
+        print(f"Saved {sibling} ({os.path.getsize(sibling):,} bytes)")
+
+    plt.close(fig)
 
 
 if __name__ == "__main__":
