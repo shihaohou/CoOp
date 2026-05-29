@@ -282,8 +282,17 @@ def main():
     def _seed(r: int, c: int) -> int:
         return r * 1000 + c
 
+    # Modes that intentionally scramble pixels. For the Original column we
+    # always swap to a non-destructive resize, no matter what the user
+    # passed in --resample, so the leftmost cell always shows the real
+    # input image.
+    _DESTRUCTIVE_RESAMPLE = {"nearest_shuffle"}
+
+    def _resample_for_cell(mode: str, c: int) -> str:
+        return "auto" if c == 0 and mode in _DESTRUCTIVE_RESAMPLE else mode
+
     rows_imgs = [
-        [_resize_to(im, target, mode, seed=_seed(r, c))
+        [_resize_to(im, target, _resample_for_cell(mode, c), seed=_seed(r, c))
          for c, im in enumerate(row)]
         for r, (row, mode) in enumerate(zip(rows_imgs, resamples))
     ]
@@ -296,9 +305,11 @@ def main():
     else:
         raise ValueError(
             f"--perturb needs 1 or {n_rows} values, got {len(args.perturb)}")
-    if any(p != "none" for p in perturbs):
-        print(f"perturb per row = {perturbs} "
-              f"(visual-only, skipped on Original column)")
+
+    # Defensive copy of every Original cell BEFORE any perturb runs, so we
+    # can guarantee it is untouched even if a future code path mutates the
+    # list in place.
+    original_cells = [row[0].copy() for row in rows_imgs]
 
     # Apply perturb only to iter cells (cols 1+), never to Original.
     for r, mode in enumerate(perturbs):
@@ -306,6 +317,14 @@ def main():
             continue
         for c in range(1, n_cols):
             rows_imgs[r][c] = _perturb(rows_imgs[r][c], mode, seed=_seed(r, c))
+
+    # Restore Original cells unconditionally.
+    for r in range(n_rows):
+        rows_imgs[r][0] = original_cells[r]
+
+    if any(p != "none" for p in perturbs):
+        print(f"perturb per row = {perturbs}")
+    print("Original column (col 0) is never resampled-shuffled or perturbed.")
 
     if args.save_resized:
         for row_dir, imgs, mode in zip(args.row_dirs, rows_imgs, resamples):
