@@ -31,12 +31,23 @@ from matplotlib.lines import Line2D  # noqa: E402
 from PIL import Image  # noqa: E402
 
 
-_RESAMPLE_MAP = {
+_PIL_RESAMPLE = {
     "nearest": Image.NEAREST,
     "bilinear": Image.BILINEAR,
     "bicubic": Image.BICUBIC,
     "lanczos": Image.LANCZOS,
 }
+
+_BLOCK_OPS = {
+    "block_max": lambda arr, axes: arr.max(axis=axes),
+    "block_min": lambda arr, axes: arr.min(axis=axes),
+    "block_median": lambda arr, axes: np.median(arr, axis=axes),
+}
+
+_RESAMPLE_CHOICES = (
+    ["auto"] + list(_PIL_RESAMPLE.keys()) + list(_BLOCK_OPS.keys())
+    + ["nearest_shuffle"]
+)
 
 
 def _load_png(path: str) -> Image.Image:
@@ -52,15 +63,52 @@ def _row_images(row_dir: str, iters: List[int]) -> List[Image.Image]:
     return images
 
 
-def _resize_to(img: Image.Image, target: int, mode: str) -> Image.Image:
-    if img.size == (target, target):
+def _block_pool(img: Image.Image, target: int, op_name: str) -> Image.Image:
+    """Reduce each src/target x src/target block to one output pixel via
+    block_max / block_min / block_median (per channel)."""
+    arr = np.asarray(img)
+    src = arr.shape[0]
+    block = max(src // target, 1)
+    new_src = block * target
+    if new_src != src:
+        img = img.resize((new_src, new_src), Image.LANCZOS)
+        arr = np.asarray(img)
+    # (target, block, target, block, C) -> reduce over the two block axes
+    arr = arr.reshape(target, block, target, block, -1)
+    pooled = _BLOCK_OPS[op_name](arr, (1, 3))
+    return Image.fromarray(pooled.astype(np.uint8))
+
+
+def _nearest_shuffle(img: Image.Image, target: int, seed: int) -> Image.Image:
+    """NEAREST downscale + deterministic per-seed pixel-position permutation.
+
+    The shuffle preserves the pixel-color histogram but rearranges
+    positions, so two iters whose NEAREST subsamples have nearly
+    identical histograms still render as visually distinct cells. This
+    is an *artistic* perturbation, not an honest summary of the data;
+    label the figure accordingly.
+    """
+    small = img.resize((target, target), Image.NEAREST)
+    arr = np.asarray(small).copy()
+    flat = arr.reshape(-1, arr.shape[-1])
+    rng = np.random.default_rng(seed)
+    perm = rng.permutation(flat.shape[0])
+    flat = flat[perm]
+    return Image.fromarray(flat.reshape(arr.shape))
+
+
+def _resize_to(img: Image.Image, target: int, mode: str, seed: int = 0) -> Image.Image:
+    if img.size == (target, target) and mode not in ("nearest_shuffle",) + tuple(_BLOCK_OPS):
         return img
     if mode == "auto":
         src = max(img.size)
         method = Image.NEAREST if target >= src else Image.LANCZOS
-    else:
-        method = _RESAMPLE_MAP[mode]
-    return img.resize((target, target), method)
+        return img.resize((target, target), method)
+    if mode in _BLOCK_OPS:
+        return _block_pool(img, target, mode)
+    if mode == "nearest_shuffle":
+        return _nearest_shuffle(img, target, seed)
+    return img.resize((target, target), _PIL_RESAMPLE[mode])
 
 
 def _add_vertical_divider(fig, axes, linewidth: float, between: int = 0) -> None:
@@ -108,13 +156,17 @@ def main():
                    help="resize every cell to this many pixels per side; "
                         "0 = max size across all inputs")
     p.add_argument("--resample", nargs="+", default=["auto"],
-                   choices=["auto", "nearest", "bilinear", "bicubic", "lanczos"],
+                   choices=_RESAMPLE_CHOICES,
                    help="resampling filter. Pass 1 value to apply it to all "
-                        "rows, or N values to set one per row. 'auto' picks "
-                        "NEAREST when upscaling (preserves pixel art) and "
-                        "LANCZOS when downscaling (averages over 7x7 blocks "
-                        "so different iters look different instead of "
-                        "becoming the same random subsample).")
+                        "rows, or N values for per-row control. Modes:\n"
+                        "  auto         NEAREST up, LANCZOS down\n"
+                        "  nearest      single pixel per block (boring)\n"
+                        "  lanczos      block average (smooth)\n"
+                        "  block_max    brightest pixel per block (chaotic)\n"
+                        "  block_median median per block (chaotic, mild)\n"
+                        "  block_min    darkest pixel per block (chaotic)\n"
+                        "  nearest_shuffle  NEAREST + per-cell pixel shuffle "
+                        "(artificial chaos)")
     p.add_argument("--save-resized", action="store_true",
                    help="also save each resized cell under "
                         "<row_dir>/resized_<target>_<resample>/")
@@ -176,8 +228,15 @@ def main():
             f"--resample needs 1 or {n_rows} values, got {len(args.resample)}")
     print(f"target cell pixel size = {target} | resample per row = {resamples}")
 
-    rows_imgs = [[_resize_to(im, target, mode) for im in row]
-                 for row, mode in zip(rows_imgs, resamples)]
+    # Per-cell seed so nearest_shuffle gives different scrambles per row/col.
+    def _seed(r: int, c: int) -> int:
+        return r * 1000 + c
+
+    rows_imgs = [
+        [_resize_to(im, target, mode, seed=_seed(r, c))
+         for c, im in enumerate(row)]
+        for r, (row, mode) in enumerate(zip(rows_imgs, resamples))
+    ]
 
     if args.save_resized:
         for row_dir, imgs, mode in zip(args.row_dirs, rows_imgs, resamples):
