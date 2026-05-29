@@ -1,18 +1,22 @@
 """Stitch gradient-inversion snapshots into a Fig. 7-style figure.
 
-Inputs are two output directories (one per row), each produced by
-``privacy_attack_coop.py``. Each directory must contain
-``original.png`` plus ``iter_XYZ.png`` for the iterations listed in
-``--iters``.
+Inputs are two (or more) output directories, one per row, each produced
+by ``privacy_attack_dlg.py`` or ``privacy_attack_coop.py``. Each
+directory must contain ``original.png`` plus ``iter_XYZ.png`` for the
+iterations listed in ``--iters``.
 
-The default layout is the same as in the PromptFL gradient-inversion
-figure: two rows, columns ``Original | Iter 0 | 20 | 40 | 60 | 80 | 100``,
-with a horizontal divider between the two rows.
+Because the full-row attack runs at native 32x32 (CIFAR-10) while the
+prompt-row attack runs at CLIP's 224x224, the raw PNGs from the two
+rows have different resolutions. This script upsamples everything to a
+common pixel size with nearest-neighbor interpolation before placing
+it on the grid, so both rows occupy the same visual area in the
+stitched PDF (nearest-neighbor preserves the chunky pixel look of the
+32x32 row instead of bicubic-blurring it).
 """
 
 import argparse
 import os
-from typing import List
+from typing import List, Optional
 
 import matplotlib.pyplot as plt
 from PIL import Image
@@ -31,6 +35,12 @@ def _row_images(row_dir: str, iters: List[int]) -> List[Image.Image]:
     return images
 
 
+def _resize_to(img: Image.Image, target: int) -> Image.Image:
+    if img.size == (target, target):
+        return img
+    return img.resize((target, target), Image.NEAREST)
+
+
 def main():
     p = argparse.ArgumentParser()
     p.add_argument("--row-dirs", nargs="+", required=True,
@@ -40,6 +50,9 @@ def main():
     p.add_argument("--iters", default="0,20,40,60,80,100")
     p.add_argument("--output", required=True,
                    help="output figure path (PNG or PDF)")
+    p.add_argument("--target-size", type=int, default=0,
+                   help="resize every cell to this many pixels per side with "
+                        "nearest-neighbor; 0 = use max size across all inputs")
     p.add_argument("--cell-size", type=float, default=1.6,
                    help="approximate inches per cell")
     p.add_argument("--dpi", type=int, default=300)
@@ -52,6 +65,19 @@ def main():
     n_rows = len(args.row_dirs)
     n_cols = 1 + len(iters)
 
+    # Load everything first, then pick a common pixel size.
+    rows_imgs: List[List[Image.Image]] = []
+    for row_dir in args.row_dirs:
+        rows_imgs.append(_row_images(row_dir, iters))
+
+    if args.target_size > 0:
+        target = args.target_size
+    else:
+        target = max(max(im.size) for row in rows_imgs for im in row)
+    print(f"target cell pixel size = {target}")
+
+    rows_imgs = [[_resize_to(im, target) for im in row] for row in rows_imgs]
+
     fig, axes = plt.subplots(
         n_rows, n_cols,
         figsize=(args.cell_size * n_cols, args.cell_size * n_rows),
@@ -60,8 +86,7 @@ def main():
 
     col_titles = ["Original"] + [f"Iter {it}" for it in iters]
 
-    for r, (row_dir, row_label) in enumerate(zip(args.row_dirs, args.row_labels)):
-        imgs = _row_images(row_dir, iters)
+    for r, (imgs, row_label) in enumerate(zip(rows_imgs, args.row_labels)):
         for c in range(n_cols):
             ax = axes[r, c]
             ax.imshow(imgs[c])
@@ -74,8 +99,6 @@ def main():
             if c == 0:
                 ax.set_ylabel(row_label, fontsize=11)
 
-    # Vertical divider between Original column and Iter columns: draw a
-    # thin line by tweaking the gridspec wspace and adding a line patch.
     fig.subplots_adjust(wspace=0.05, hspace=0.05)
     fig.savefig(args.output, dpi=args.dpi, bbox_inches="tight")
     print(f"Saved figure to {args.output}")
