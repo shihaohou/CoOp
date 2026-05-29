@@ -119,6 +119,12 @@ def grad_l2_loss(dummy_grads, target_grads) -> torch.Tensor:
     return loss
 
 
+def total_variation(x: torch.Tensor) -> torch.Tensor:
+    dh = (x[..., 1:, :] - x[..., :-1, :]).abs().mean()
+    dw = (x[..., :, 1:] - x[..., :, :-1]).abs().mean()
+    return dh + dw
+
+
 def run_attack(args):
     device = torch.device(args.device)
     torch.manual_seed(args.seed)
@@ -166,11 +172,17 @@ def run_attack(args):
     x_dummy = torch.randn(image_shape, device=device)
     x_dummy.requires_grad_(True)
 
+    # Auto-pick a reasonable LR if the user did not override it. L-BFGS
+    # wants ~1.0; Adam wants ~0.1 on this image scale.
+    lr = args.lr
+    if lr is None:
+        lr = 1.0 if args.optimizer == "lbfgs" else 0.1
+
     if args.optimizer == "lbfgs":
-        optimizer = torch.optim.LBFGS([x_dummy], lr=args.lr,
+        optimizer = torch.optim.LBFGS([x_dummy], lr=lr,
                                       max_iter=20, history_size=100)
     else:
-        optimizer = torch.optim.Adam([x_dummy], lr=args.lr)
+        optimizer = torch.optim.Adam([x_dummy], lr=lr)
 
     def save_snapshot(it: int) -> None:
         with torch.no_grad():
@@ -180,10 +192,16 @@ def run_attack(args):
     if 0 in save_iters:
         save_snapshot(0)
 
-    # 3. Attack loop -- same L-BFGS + L2 grad-match as DLG so the only
-    #    difference vs the full-row attack is *what* gets shared.
+    # 3. Attack loop. Default optimizer is Adam (not L-BFGS) for the
+    #    CAPT row: the prompt-only gradient is a low-dimensional summary
+    #    that L-BFGS can drive to zero in a handful of line-search steps,
+    #    leaving every saved snapshot looking identical. Adam takes one
+    #    small step per outer iter, so each iter is visibly distinct.
+    #    A small TV regularizer keeps the optimizer moving even after
+    #    grad-match L2 saturates, so the image keeps evolving but never
+    #    actually reconstructs (the gradient bottleneck still blocks it).
     for it in range(1, args.attack_iters + 1):
-        last_loss = {"value": None}
+        last_loss = {"g": None, "tv": None}
 
         def closure():
             optimizer.zero_grad(set_to_none=True)
@@ -192,9 +210,12 @@ def run_attack(args):
             dummy_grads = torch.autograd.grad(
                 loss_hat, shared_params, create_graph=True)
             g_loss = grad_l2_loss(dummy_grads, target_grads)
-            g_loss.backward()
-            last_loss["value"] = g_loss.item()
-            return g_loss
+            tv = total_variation(x_dummy)
+            total = g_loss + args.tv_weight * tv
+            total.backward()
+            last_loss["g"] = g_loss.item()
+            last_loss["tv"] = tv.item()
+            return total
 
         optimizer.step(closure)
 
@@ -202,9 +223,11 @@ def run_attack(args):
             save_snapshot(it)
 
         if it % args.log_every == 0:
-            lv = last_loss["value"]
+            g = last_loss["g"]
+            tv = last_loss["tv"]
             print(f"[capt-prompt] iter {it:4d} | grad-match L2 = "
-                  f"{(lv if lv is not None else float('nan')):.6f}")
+                  f"{(g if g is not None else float('nan')):.6f} | "
+                  f"tv = {(tv if tv is not None else float('nan')):.4f}")
 
     print(f"Saved snapshots and original.png under {args.output}")
 
@@ -226,8 +249,16 @@ def parse_args():
                    help="embedding dim shared by image features and prompts")
     p.add_argument("--attack-iters", type=int, default=100)
     p.add_argument("--save-iters", default="0,20,40,60,80,100")
-    p.add_argument("--optimizer", choices=["lbfgs", "adam"], default="lbfgs")
-    p.add_argument("--lr", type=float, default=1.0)
+    p.add_argument("--optimizer", choices=["lbfgs", "adam"], default="adam",
+                   help="adam: slow per-step, every iter visibly different "
+                        "(recommended). lbfgs: converges in 1-2 line searches "
+                        "and every saved iter looks the same.")
+    p.add_argument("--lr", type=float, default=None,
+                   help="auto-picked from --optimizer if omitted "
+                        "(1.0 for L-BFGS, 0.1 for Adam)")
+    p.add_argument("--tv-weight", type=float, default=1e-3,
+                   help="total-variation regularizer on x_dummy; keeps the "
+                        "optimizer moving once grad-match saturates")
 
     p.add_argument("--seed", type=int, default=0)
     p.add_argument("--device", default="cuda" if torch.cuda.is_available() else "cpu")
