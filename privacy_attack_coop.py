@@ -39,6 +39,20 @@ from clip.simple_tokenizer import SimpleTokenizer as _Tokenizer
 _tokenizer = _Tokenizer()
 
 
+# Gradient inversion requires double-backward through CLIP's MultiheadAttention
+# (text transformer) and AttentionPool2d (visual). The flash and
+# memory-efficient SDPA kernels in PyTorch 2.x do not implement the second
+# derivative ("derivative for aten::_scaled_dot_product_efficient_attention_
+# backward is not implemented"), so force the math backend, which does.
+if torch.cuda.is_available():
+    try:
+        torch.backends.cuda.enable_flash_sdp(False)
+        torch.backends.cuda.enable_mem_efficient_sdp(False)
+        torch.backends.cuda.enable_math_sdp(True)
+    except AttributeError:
+        pass
+
+
 CLIP_PIXEL_MEAN = (0.48145466, 0.4578275, 0.40821073)
 CLIP_PIXEL_STD = (0.26862954, 0.26130258, 0.27577711)
 
