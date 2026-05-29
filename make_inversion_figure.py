@@ -5,21 +5,17 @@ by ``privacy_attack_dlg.py`` or ``privacy_attack_coop.py``. Each
 directory must contain ``original.png`` plus ``iter_XYZ.png`` for the
 iterations listed in ``--iters``.
 
-Output figure layout (matches the PromptFL Fig. 7 reference):
+Figure layout (matches the PromptFL Fig. 7 reference):
 
-    | Original | <- vertical line -> | Iter 0 | Iter 20 | ... | Iter 100 |
-    -------------------------- dashed horizontal divider -------------------
-    | Original |                     | Iter 0 | Iter 20 | ... | Iter 100 |
+    | Original |  <gap>  | Iter 0 | Iter 20 | ... | Iter 100 |
+    --------------------- dashed horizontal divider ----------
+    | Original |  <gap>  | Iter 0 | Iter 20 | ... | Iter 100 |
 
-  * cells have no borders
-  * Original column is separated from the Iter columns by a solid line
-  * adjacent rows are separated by a dashed line
-  * everything is resized to a common pixel size (default: max across
-    inputs; pass --target-size 32 to shrink the prompt row down to
-    the full row's 32x32 native resolution)
-
-With --save-resized, each post-resize cell is also written separately
-to <row_dir>/resized_<target>_<resample>/ for use outside the figure.
+A solid vertical line sits inside <gap>, separating the Original column
+from the Iter columns. <gap> is implemented as a phantom GridSpec
+column so it can be wider than the other inter-column gaps without
+disturbing them. With --save-resized, each post-resize cell is also
+written separately under <row_dir>/resized_<target>_<resample>/.
 """
 
 import argparse
@@ -67,9 +63,9 @@ def _resize_to(img: Image.Image, target: int, mode: str) -> Image.Image:
     return img.resize((target, target), method)
 
 
-def _add_vertical_divider(fig, axes, between: int = 0) -> None:
-    """Solid line between column `between` and `between + 1`, spanning
-    from below the bottom row to above the top row."""
+def _add_vertical_divider(fig, axes, linewidth: float, between: int = 0) -> None:
+    """Solid line midway between column `between` and `between + 1`,
+    spanning the full row range."""
     pos_l = axes[0, between].get_position()
     pos_r = axes[0, between + 1].get_position()
     x = (pos_l.x1 + pos_r.x0) / 2.0
@@ -77,14 +73,14 @@ def _add_vertical_divider(fig, axes, between: int = 0) -> None:
     y_bot = axes[-1, between].get_position().y0 - 0.01
     fig.add_artist(Line2D(
         [x, x], [y_bot, y_top],
-        color="black", linewidth=1.4,
+        color="black", linewidth=linewidth,
         transform=fig.transFigure,
     ))
 
 
-def _add_horizontal_dashed_divider(fig, axes, between: int = 0) -> None:
+def _add_horizontal_dashed_divider(fig, axes, linewidth: float, between: int = 0) -> None:
     """Dashed line midway between rows `between` and `between + 1`,
-    spanning the full figure width."""
+    spanning the full column range."""
     pos_top = axes[between, 0].get_position()
     pos_bot = axes[between + 1, 0].get_position()
     y = (pos_top.y0 + pos_bot.y1) / 2.0
@@ -92,7 +88,7 @@ def _add_horizontal_dashed_divider(fig, axes, between: int = 0) -> None:
     x_r = axes[between, -1].get_position().x1 + 0.02
     fig.add_artist(Line2D(
         [x_l, x_r], [y, y],
-        color="black", linewidth=1.0, linestyle="--",
+        color="black", linewidth=linewidth, linestyle="--",
         transform=fig.transFigure,
     ))
 
@@ -106,22 +102,43 @@ def main():
     p.add_argument("--iters", default="0,20,40,60,80,100")
     p.add_argument("--output", required=True,
                    help="output PDF (a sibling .png is also saved)")
+
+    # Resizing
     p.add_argument("--target-size", type=int, default=0,
                    help="resize every cell to this many pixels per side; "
                         "0 = max size across all inputs")
     p.add_argument("--resample", default="nearest",
-                   choices=["auto", "nearest", "bilinear", "bicubic", "lanczos"],
-                   help="resampling filter (default nearest)")
+                   choices=["auto", "nearest", "bilinear", "bicubic", "lanczos"])
+    p.add_argument("--save-resized", action="store_true",
+                   help="also save each resized cell under "
+                        "<row_dir>/resized_<target>_<resample>/")
+
+    # Layout
     p.add_argument("--cell-size", type=float, default=1.6,
                    help="approximate inches per cell")
-    p.add_argument("--hspace", type=float, default=0.5,
-                   help="vertical gap between rows, as fraction of axes height")
     p.add_argument("--wspace", type=float, default=0.08,
-                   help="horizontal gap between columns, as fraction of axes width")
+                   help="horizontal gap between adjacent Iter columns "
+                        "as a fraction of axes width")
+    p.add_argument("--hspace", type=float, default=0.5,
+                   help="vertical gap between rows as a fraction of axes height")
+    p.add_argument("--original-gap", type=float, default=1.0,
+                   help="width of the gap column between Original and Iter "
+                        "columns, in multiples of a cell width (1.0 = one "
+                        "full cell wide; bump higher for more separation)")
+
+    # Fonts
+    p.add_argument("--title-fontsize", type=float, default=12.0,
+                   help="font size of column titles (Original / Iter N)")
+    p.add_argument("--label-fontsize", type=float, default=11.0,
+                   help="font size of row labels (left side)")
+
+    # Divider lines
+    p.add_argument("--vline-width", type=float, default=1.4,
+                   help="line width of the solid vertical divider")
+    p.add_argument("--hline-width", type=float, default=1.0,
+                   help="line width of the dashed horizontal divider(s)")
+
     p.add_argument("--dpi", type=int, default=300)
-    p.add_argument("--save-resized", action="store_true",
-                   help="also save each resized cell as a separate PNG under "
-                        "<row_dir>/resized_<target>_<resample>/")
     args = p.parse_args()
 
     if len(args.row_dirs) != len(args.row_labels):
@@ -131,7 +148,7 @@ def main():
     n_rows = len(args.row_dirs)
     n_cols = 1 + len(iters)
 
-    # Load everything, then choose a common pixel size.
+    # ---- 1. Load and resize ----
     rows_imgs: List[List[Image.Image]] = []
     for row_dir in args.row_dirs:
         imgs = _row_images(row_dir, iters)
@@ -147,7 +164,6 @@ def main():
     rows_imgs = [[_resize_to(im, target, args.resample) for im in row]
                  for row in rows_imgs]
 
-    # Save resized cells separately if requested.
     if args.save_resized:
         for row_dir, imgs in zip(args.row_dirs, rows_imgs):
             out_dir = os.path.join(row_dir, f"resized_{target}_{args.resample}")
@@ -157,44 +173,58 @@ def main():
                 imgs[i + 1].save(os.path.join(out_dir, f"iter_{it:03d}.png"))
             print(f"saved resized cells -> {out_dir}/")
 
-    # Grow the figure vertically to absorb the extra hspace so each cell
-    # keeps roughly the requested cell-size in inches.
-    fig_w = args.cell_size * n_cols * (1.0 + args.wspace)
+    # ---- 2. Layout via GridSpec with a phantom "gap" column ----
+    # Logical layout: [Original] [GAP] [Iter 0] [Iter 1] ... [Iter K]
+    # so the gap between Original and the first Iter column is independent
+    # of the gap between adjacent Iter columns.
+    n_grid_cols = n_cols + 1  # +1 phantom spacer
+    width_ratios = [1.0, args.original_gap] + [1.0] * (n_cols - 1)
+
+    # Grow the figure to absorb the extra spacer column and the extra hspace.
+    total_w_units = sum(width_ratios)
+    fig_w = args.cell_size * total_w_units * (1.0 + args.wspace)
     fig_h = args.cell_size * (n_rows + (n_rows - 1) * args.hspace) + 0.4
-    fig, axes = plt.subplots(n_rows, n_cols, figsize=(fig_w, fig_h), squeeze=False)
 
+    fig = plt.figure(figsize=(fig_w, fig_h))
+    gs = fig.add_gridspec(
+        n_rows, n_grid_cols,
+        width_ratios=width_ratios,
+        wspace=args.wspace, hspace=args.hspace,
+        left=0.08, right=0.98, top=0.92, bottom=0.05,
+    )
+
+    # axes[r, c] indexes by *display* column (Original=0, Iter0=1, ...).
+    # The phantom spacer at GridSpec col 1 has no axes.
+    axes = np.empty((n_rows, n_cols), dtype=object)
+    for r in range(n_rows):
+        for c in range(n_cols):
+            grid_c = c if c == 0 else c + 1
+            ax = fig.add_subplot(gs[r, grid_c])
+            ax.set_xticks([])
+            ax.set_yticks([])
+            for spine in ax.spines.values():
+                spine.set_visible(False)
+            axes[r, c] = ax
+
+    # ---- 3. Draw images + labels ----
     col_titles = ["Original"] + [f"Iter {it}" for it in iters]
-
-    # No cell borders.
-    for ax in axes.flat:
-        ax.set_xticks([])
-        ax.set_yticks([])
-        for spine in ax.spines.values():
-            spine.set_visible(False)
 
     for r, imgs in enumerate(rows_imgs):
         for c in range(n_cols):
-            # numpy.asarray makes the PIL -> matplotlib path explicit.
             axes[r, c].imshow(np.asarray(imgs[c]))
 
     for c, title in enumerate(col_titles):
-        axes[0, c].set_title(title, fontsize=12)
+        axes[0, c].set_title(title, fontsize=args.title_fontsize)
     for r, label in enumerate(args.row_labels):
-        axes[r, 0].set_ylabel(label, fontsize=11)
+        axes[r, 0].set_ylabel(label, fontsize=args.label_fontsize)
 
-    fig.subplots_adjust(
-        left=0.08, right=0.98, top=0.92, bottom=0.05,
-        wspace=args.wspace, hspace=args.hspace,
-    )
-
-    # Solid divider between the Original column and the Iter columns.
+    # ---- 4. Dividers ----
     if n_cols >= 2:
-        _add_vertical_divider(fig, axes, between=0)
-
-    # Dashed divider between every pair of rows.
+        _add_vertical_divider(fig, axes, args.vline_width, between=0)
     for r in range(n_rows - 1):
-        _add_horizontal_dashed_divider(fig, axes, between=r)
+        _add_horizontal_dashed_divider(fig, axes, args.hline_width, between=r)
 
+    # ---- 5. Save ----
     fig.savefig(args.output, dpi=args.dpi)
     print(f"Saved {args.output} ({os.path.getsize(args.output):,} bytes)")
 
