@@ -33,9 +33,9 @@ SAVE_ITERS=0,20,40,60,80,100
 mkdir -p "${OUT}"
 
 echo "============================================================"
-echo "[1/3] Full-model FL: ResNet-18 full-gradient attack (32x32)"
+echo "[1/3] Full-model FL: DLG-style LeNet attack (32x32, L-BFGS)"
 echo "============================================================"
-python privacy_attack_resnet.py \
+python privacy_attack_dlg.py \
     --image-path      "${IMAGE}" \
     --label           "${LABEL}" \
     --classnames-file "${CLASSNAMES}" \
